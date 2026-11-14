@@ -795,9 +795,12 @@ server.on('upgrade', (req, socket, head) => {
                 socket.end();
                 break;
             } else if (opcode === 0x9) {
-                // Ping -> send Pong
-                const pongHeader = Buffer.from([0x8A, 0x00]);
-                socket.write(pongHeader);
+                // Ping -> send Pong with exact payload (RFC 6455 5.5.3)
+                const pongFrame = Buffer.alloc(2 + payload.length);
+                pongFrame[0] = 0x8A;
+                pongFrame[1] = payload.length;
+                payload.copy(pongFrame, 2);
+                socket.write(pongFrame);
             } else if (opcode === 0x1) {
                 // Text frame
                 const messageText = payload.toString('utf8');
