@@ -19,6 +19,49 @@ const statuses = []; // list of { id, username, displayName, userAvatar, content
 const activeSockets = new Map(); // username -> WebSocket connection object
 const offlineMessages = new Map(); // username -> array of pending ChatMessages
 
+// Disk Storage Persistence
+const USERS_FILE = path.join(__dirname, 'users.json');
+const STATUSES_FILE = path.join(__dirname, 'statuses.json');
+const OFFLINE_MSGS_FILE = path.join(__dirname, 'offline_messages.json');
+
+try {
+    if (fs.existsSync(USERS_FILE)) {
+        const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+        Object.entries(data).forEach(([k, v]) => users.set(k, v));
+        console.log(`[INIT] Loaded ${users.size} users from disk.`);
+    }
+    if (fs.existsSync(STATUSES_FILE)) {
+        const data = JSON.parse(fs.readFileSync(STATUSES_FILE, 'utf8'));
+        if (Array.isArray(data)) statuses.push(...data);
+        console.log(`[INIT] Loaded ${statuses.length} statuses from disk.`);
+    }
+    if (fs.existsSync(OFFLINE_MSGS_FILE)) {
+        const data = JSON.parse(fs.readFileSync(OFFLINE_MSGS_FILE, 'utf8'));
+        Object.entries(data).forEach(([k, v]) => offlineMessages.set(k, v));
+        console.log(`[INIT] Loaded offline messages from disk.`);
+    }
+} catch (e) {
+    console.error('[INIT] Error loading disk data:', e.message);
+}
+
+function saveServerData() {
+    try {
+        const usersObj = {};
+        for (const [k, v] of users.entries()) {
+            usersObj[k] = v;
+        }
+        fs.writeFileSync(USERS_FILE, JSON.stringify(usersObj, null, 2));
+        fs.writeFileSync(STATUSES_FILE, JSON.stringify(statuses, null, 2));
+        const offlineObj = {};
+        for (const [k, v] of offlineMessages.entries()) {
+            offlineObj[k] = v;
+        }
+        fs.writeFileSync(OFFLINE_MSGS_FILE, JSON.stringify(offlineObj, null, 2));
+    } catch (e) {
+        console.error('[SAVE] Error saving disk data:', e.message);
+    }
+}
+
 // Helper: SHA256 password hash
 function hashPassword(pass) {
     return crypto.createHash('sha256').update(pass).digest('hex');
@@ -494,6 +537,7 @@ const server = http.createServer((req, res) => {
                 lastSeen: Date.now()
             };
             users.set(cleanUser, newUser);
+            saveServerData();
             console.log(`[AUTH] Registered new user: @${cleanUser}`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, user: newUser }));
@@ -569,6 +613,7 @@ const server = http.createServer((req, res) => {
                 timestamp: Date.now()
             };
             statuses.unshift(story);
+            saveServerData();
             // Broadcast live to all connected devices
             broadcastToAll({
                 type: 'new_status',
@@ -841,6 +886,7 @@ function handleSocketMessage(text, reply, onAuth, currentSocket) {
                     }
                 }
                 offlineMessages.delete(cleanUser);
+                saveServerData();
             }
         } else if (msg.type === 'chat_message') {
             const cleanRecipient = (msg.recipient || '').toLowerCase().trim().replace(/^@+/, '');
@@ -865,6 +911,7 @@ function handleSocketMessage(text, reply, onAuth, currentSocket) {
                     offlineMessages.set(cleanRecipient, []);
                 }
                 offlineMessages.get(cleanRecipient).push(msg);
+                saveServerData();
                 reply({
                     type: 'message_status',
                     messageId: msg.id,
