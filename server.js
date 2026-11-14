@@ -496,8 +496,8 @@ const server = http.createServer((req, res) => {
             about: user.about,
             avatarUrl: user.avatarUrl,
             publicKey: user.publicKey,
-            isOnline: u.isOnline,
-            lastSeen: u.lastSeen
+            isOnline: user.isOnline,
+            lastSeen: user.lastSeen
         }));
     } else if (pathname === '/api/statuses' && method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -522,6 +522,20 @@ const server = http.createServer((req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, story }));
         });
+    } else if (pathname === '/' || pathname === '/web') {
+        const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
+        if (acceptsHtml || pathname === '/web') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(HTML_PAGE);
+        } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                name: 'WhatsApp Clone Backend Server',
+                status: 'online',
+                e2ee: 'Enabled (ECDH + AES-256-GCM)',
+                activeUsers: activeSockets.size
+            }));
+        }
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
