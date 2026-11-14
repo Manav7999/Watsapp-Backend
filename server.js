@@ -4,8 +4,14 @@
 const http = require('http');
 const crypto = require('crypto');
 const url = require('url');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 8080;
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+    try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) {}
+}
 
 // In-Memory Storage
 const users = new Map(); // username -> { username, displayName, passwordHash, about, publicKey, isOnline, lastSeen }
@@ -551,10 +557,11 @@ const server = http.createServer((req, res) => {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ error: 'Invalid status data' }));
             }
+            const cleanUser = (data.username || '').toLowerCase().trim().replace(/^@+/, '');
             const story = {
                 id: 'status_' + Date.now() + '_' + Math.random().toString(36).substring(7),
-                username: data.username,
-                displayName: data.displayName || data.username,
+                username: cleanUser,
+                displayName: data.displayName || cleanUser,
                 userAvatar: data.userAvatar || '',
                 contentText: data.contentText || '',
                 mediaUrl: data.mediaUrl || null,
@@ -562,9 +569,59 @@ const server = http.createServer((req, res) => {
                 timestamp: Date.now()
             };
             statuses.unshift(story);
+            // Broadcast live to all connected devices
+            broadcastToAll({
+                type: 'new_status',
+                story: story
+            });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, story }));
         });
+    } else if (pathname === '/api/upload' && method === 'POST') {
+        readJsonBody((err, data) => {
+            if (err || !data.data) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Missing file data' }));
+            }
+            try {
+                const buffer = Buffer.from(data.data, 'base64');
+                const rawName = (data.filename || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+                const safeName = Date.now() + '_' + rawName;
+                fs.writeFileSync(path.join(UPLOADS_DIR, safeName), buffer);
+                const fileUrl = '/uploads/' + safeName;
+                console.log(`[UPLOAD] Saved file: ${safeName} (${buffer.length} bytes)`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, url: fileUrl, filename: safeName }));
+            } catch (e) {
+                console.error('[UPLOAD] Error saving file:', e.message);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Upload failed: ' + e.message }));
+            }
+        });
+    } else if (pathname.startsWith('/uploads/') && method === 'GET') {
+        const fileName = path.basename(pathname);
+        const filePath = path.join(UPLOADS_DIR, fileName);
+        if (fs.existsSync(filePath)) {
+            const ext = path.extname(filePath).toLowerCase();
+            const mimeTypes = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.mp4': 'video/mp4',
+                '.mp3': 'audio/mpeg',
+                '.m4a': 'audio/mp4',
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain'
+            };
+            const contentType = mimeTypes[ext] || 'application/octet-stream';
+            res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=86400' });
+            fs.createReadStream(filePath).pipe(res);
+        } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('File not found');
+        }
     } else if (pathname === '/' || pathname === '/web') {
         const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
         if (acceptsHtml || pathname === '/web') {
@@ -831,10 +888,13 @@ function handleSocketMessage(text, reply, onAuth, currentSocket) {
             }
         } else if (msg.type === 'call_offer' || msg.type === 'call_answer' || msg.type === 'call_hangup') {
             // WebRTC Call Signaling relay
-            const target = msg.callee || msg.peer || msg.caller;
+            const target = (msg.callee || msg.peer || msg.caller || '').toLowerCase().trim().replace(/^@+/, '');
             const targetSocket = activeSockets.get(target);
             if (targetSocket) {
+                console.log(`[CALL] Relaying ${msg.type} to @${target}`);
                 sendJsonToSocket(targetSocket, msg);
+            } else {
+                console.log(`[CALL] Target @${target} is offline for ${msg.type}`);
             }
         }
     } catch (e) {
