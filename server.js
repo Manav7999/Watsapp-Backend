@@ -11,6 +11,7 @@ const PORT = process.env.PORT || 8080;
 const users = new Map(); // username -> { username, displayName, passwordHash, about, publicKey, isOnline, lastSeen }
 const statuses = []; // list of { id, username, displayName, userAvatar, contentText, mediaUrl, backgroundColorHex, timestamp }
 const activeSockets = new Map(); // username -> WebSocket connection object
+const offlineMessages = new Map(); // username -> array of pending ChatMessages
 
 // Helper: SHA256 password hash
 function hashPassword(pass) {
@@ -103,11 +104,18 @@ const HTML_PAGE = `<!DOCTYPE html>
                 </div>
             </div>
             <div class="search-box">
-                <input type="text" id="targetSearch" class="search-input" placeholder="Enter username to chat (e.g. manav)..." onkeydown="if(event.key==='Enter') startChatFromSearch()">
+                <input type="text" id="targetSearch" class="search-input" placeholder="Type @username and press Enter..." onkeydown="if(event.key==='Enter') startChatFromSearch()">
+            </div>
+            <div style="padding: 6px 16px; font-size: 11px; font-weight: bold; color: #008069; background: #F0F2F5; border-bottom: 1px solid #E9EDEF; text-transform: uppercase; letter-spacing: 0.5px;">
+                Registered Users (Tap to Chat)
+            </div>
+            <div id="usersList" style="max-height: 150px; overflow-y: auto; border-bottom: 2px solid #008069; background: #FAFBFB;"></div>
+            <div style="padding: 6px 16px; font-size: 11px; font-weight: bold; color: #667781; background: #F0F2F5; border-bottom: 1px solid #E9EDEF; text-transform: uppercase; letter-spacing: 0.5px;">
+                Recent Chats
             </div>
             <div class="chat-list" id="chatList">
                 <div style="padding: 24px 16px; text-align: center; color: #8696A0; font-size: 13px;">
-                    Type your phone's username above (e.g. <b>manav</b>) and press Enter to chat!
+                    Tap any registered user above to start chatting!
                 </div>
             </div>
         </div>
@@ -204,6 +212,8 @@ const HTML_PAGE = `<!DOCTYPE html>
                 document.getElementById('authModal').style.display = 'none';
 
                 connectWebSocket();
+                fetchRegisteredUsers();
+                setInterval(fetchRegisteredUsers, 4000);
             } catch (err) {
                 errDiv.textContent = 'Network error: ' + err.message;
             }
@@ -270,7 +280,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         function startChatFromSearch() {
             const input = document.getElementById('targetSearch');
-            const target = input.value.trim().toLowerCase();
+            const target = input.value.trim().toLowerCase().replace(/^@+/, '');
             if (!target) return;
             if (target === myUsername) {
                 alert("You cannot chat with yourself!");
@@ -279,6 +289,39 @@ const HTML_PAGE = `<!DOCTYPE html>
 
             openChatWith(target);
             input.value = '';
+        }
+
+        async function fetchRegisteredUsers() {
+            try {
+                const res = await fetch('/api/users');
+                const users = await res.json();
+                const container = document.getElementById('usersList');
+                if (!container) return;
+                container.innerHTML = '';
+                const others = users.filter(u => u.username !== myUsername);
+                if (others.length === 0) {
+                    container.innerHTML = '<div style="padding: 10px 16px; font-size: 12px; color: #8696A0;">No other users found yet.</div>';
+                    return;
+                }
+                others.forEach(u => {
+                    const d = document.createElement('div');
+                    d.style = 'padding: 8px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; border-bottom: 1px solid #F0F2F5;';
+                    d.onmouseover = () => d.style.background = '#E9EDEF';
+                    d.onmouseout = () => d.style.background = 'transparent';
+                    d.onclick = () => openChatWith(u.username);
+                    const init = (u.displayName || u.username)[0].toUpperCase();
+                    d.innerHTML = `
+                        <div style="width: 32px; height: 32px; border-radius: 50%; background: #008069; color: white; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold;">${init}</div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="font-weight: 600; font-size: 14px; color: #111B21;">${escapeHtml(u.displayName || u.username)} <span style="font-size: 11px; color: #008069;">@${escapeHtml(u.username)}</span></div>
+                            <div style="font-size: 11px; color: #667781; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(u.about || 'Tap to chat')}</div>
+                        </div>
+                    `;
+                    container.appendChild(d);
+                });
+            } catch (e) {
+                console.error("fetchRegisteredUsers error", e);
+            }
         }
 
         function openChatWith(username) {
@@ -660,7 +703,7 @@ server.on('upgrade', (req, socket, head) => {
                     currentUsername = user;
                     activeSockets.set(user, socket);
                     broadcastPresence(user, true);
-                });
+                }, socket);
             }
         }
     });
@@ -721,28 +764,56 @@ function sendJsonToSocket(socket, obj) {
     socket.write(Buffer.concat([header, jsonStr]));
 }
 
-function handleSocketMessage(text, reply, onAuth) {
+function handleSocketMessage(text, reply, onAuth, currentSocket) {
     try {
         const msg = JSON.parse(text);
         console.log(`[MSG] Type: ${msg.type}, From: ${msg.sender || msg.username}, To: ${msg.recipient || msg.peer || 'broadcast'}`);
 
         if (msg.type === 'auth') {
-            onAuth(msg.username);
-            reply({ type: 'auth_success', username: msg.username });
+            const cleanUser = (msg.username || '').toLowerCase().trim().replace(/^@+/, '');
+            onAuth(cleanUser);
+            reply({ type: 'auth_success', username: cleanUser });
+
+            // Flush offline buffered messages for this user
+            if (offlineMessages.has(cleanUser)) {
+                const pending = offlineMessages.get(cleanUser);
+                console.log(`[MSG] Delivering ${pending.length} buffered offline messages to @${cleanUser}`);
+                for (const pendingMsg of pending) {
+                    if (currentSocket) {
+                        sendJsonToSocket(currentSocket, pendingMsg);
+                    }
+                }
+                offlineMessages.delete(cleanUser);
+            }
         } else if (msg.type === 'chat_message') {
+            const cleanRecipient = (msg.recipient || '').toLowerCase().trim().replace(/^@+/, '');
+            const cleanSender = (msg.sender || '').toLowerCase().trim().replace(/^@+/, '');
+            msg.recipient = cleanRecipient;
+            msg.sender = cleanSender;
+
             // Forward encrypted message to recipient
-            const recipientSocket = activeSockets.get(msg.recipient);
+            const recipientSocket = activeSockets.get(cleanRecipient);
             if (recipientSocket) {
                 sendJsonToSocket(recipientSocket, msg);
                 // Send delivery confirmation back to sender
                 reply({
                     type: 'message_status',
                     messageId: msg.id,
-                    recipient: msg.recipient,
+                    recipient: cleanRecipient,
                     status: 'DELIVERED'
                 });
             } else {
-                console.log(`[MSG] Recipient @${msg.recipient} is offline. Message buffered.`);
+                console.log(`[MSG] Recipient @${cleanRecipient} is currently offline. Queuing message in buffer.`);
+                if (!offlineMessages.has(cleanRecipient)) {
+                    offlineMessages.set(cleanRecipient, []);
+                }
+                offlineMessages.get(cleanRecipient).push(msg);
+                reply({
+                    type: 'message_status',
+                    messageId: msg.id,
+                    recipient: cleanRecipient,
+                    status: 'SENT'
+                });
             }
         } else if (msg.type === 'typing') {
             const recipientSocket = activeSockets.get(msg.recipient);
