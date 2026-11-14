@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-clone-backend",
+  "version": "1.0.0",
+  "description": "WhatsApp Clone Real-Time WebSocket & REST Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
